@@ -32,7 +32,8 @@ async function callOpenRouter(messages, options = {}) {
     const res = await fetch(OPENROUTER_API_URL, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(2000)
     });
 
     const data = await res.json();
@@ -225,7 +226,8 @@ async function checkModelStatus() {
 
     try {
         const res = await fetch(OPENROUTER_AUTH_URL, {
-            headers: { 'Authorization': `Bearer ${apiKey}` }
+            headers: { 'Authorization': `Bearer ${apiKey}` },
+            signal: AbortSignal.timeout(2000)
         });
         const data = await res.json();
         

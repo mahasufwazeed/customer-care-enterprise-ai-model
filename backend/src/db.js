@@ -1,14 +1,16 @@
 const { Pool } = require('pg');
 const crypto = require('crypto');
-require('dotenv').config();
+const { config } = require('./config');
 
 const realPool = new Pool({
-    user: process.env.DB_USER || 'postgres',
-    host: process.env.DB_HOST || 'localhost',
-    database: process.env.DB_NAME || 'ai_orchestrator',
-    password: process.env.DB_PASSWORD || 'postgres',
-    port: process.env.DB_PORT || 5432,
-    connectionTimeoutMillis: 1500
+    user: config.db.user,
+    host: config.db.host,
+    database: config.db.database,
+    password: config.db.password,
+    port: config.db.port,
+    max: config.db.maxConnections,
+    idleTimeoutMillis: config.db.idleTimeoutMillis,
+    connectionTimeoutMillis: config.db.connectionTimeoutMillis
 });
 
 // In-memory fallback database
@@ -19,25 +21,27 @@ const memoryDb = {
 };
 
 let postgresHealthy = false;
-let checkedHealth = false;
 
 async function checkPostgresHealth() {
-    if (checkedHealth) return postgresHealthy;
     try {
         const client = await realPool.connect();
         client.release();
+        if (!postgresHealthy) {
+            console.log('PostgreSQL connection established and healthy.');
+        }
         postgresHealthy = true;
-        console.log('Connected to PostgreSQL successfully.');
     } catch (err) {
+        if (postgresHealthy) {
+            console.warn(`[Database Notice] PostgreSQL disconnected (${err.code || err.message}). Failing over to in-memory mode.`);
+        }
         postgresHealthy = false;
-        console.warn(`[Database Notice] PostgreSQL not reachable (${err.code || err.message}). Operating in resilient in-memory mode.`);
     }
-    checkedHealth = true;
     return postgresHealthy;
 }
 
-// Initial health check in background
+// Initial health check + periodic auto-reconnect polling (every 10s)
 checkPostgresHealth();
+setInterval(checkPostgresHealth, 10000).unref();
 
 /**
  * Fallback query processor for development without active local Postgres
@@ -70,16 +74,24 @@ function runMemoryQuery(text, params = []) {
         return { rows: [{ id }], rowCount: 1 };
     }
 
-    // UPDATE tickets SET ... WHERE id = $6
+    // UPDATE tickets SET ...
     if (upper.startsWith('UPDATE TICKETS')) {
-        const id = params[5];
+        // Find ticket ID from params (either last param or param 5)
+        const id = params[params.length - 1];
         const ticket = memoryDb.tickets.find(t => t.id === id);
         if (ticket) {
-            ticket.status = params[0];
-            ticket.confidence_score = params[1];
-            ticket.fraud_flag = params[2];
-            ticket.policy_audit_passed = params[3];
-            ticket.requires_human_handoff = params[4];
+            if (params.length >= 6) {
+                ticket.status = params[0];
+                ticket.confidence_score = params[1];
+                ticket.fraud_flag = params[2];
+                ticket.policy_audit_passed = params[3];
+                ticket.requires_human_handoff = params[4];
+            } else if (params.length >= 2) {
+                ticket.status = params[0];
+                if (params.length >= 3 && typeof params[1] === 'boolean') {
+                    ticket.requires_human_handoff = params[1];
+                }
+            }
             ticket.updated_at = new Date().toISOString();
         }
         return { rows: ticket ? [ticket] : [], rowCount: ticket ? 1 : 0 };
@@ -176,7 +188,31 @@ const pool = {
         };
     },
 
-    isPostgresHealthy: () => postgresHealthy
+    isPostgresHealthy: () => postgresHealthy,
+    
+    async drain() {
+        console.log('Draining PostgreSQL pool...');
+        try {
+            await realPool.end();
+            console.log('PostgreSQL pool drained successfully.');
+        } catch (e) {
+            console.error('Error draining pool:', e);
+        }
+    }
 };
 
-module.exports = { pool };
+function getDbStats() {
+    return {
+        postgresHealthy,
+        totalMemoryTickets: memoryDb.tickets.length,
+        totalMemoryLogs: memoryDb.logs.length,
+        totalMemoryTransactions: memoryDb.transactions.length,
+        poolConfig: {
+            host: config.db.host,
+            database: config.db.database,
+            maxConnections: config.db.maxConnections
+        }
+    };
+}
+
+module.exports = { pool, getDbStats };
