@@ -8,7 +8,7 @@ This platform employs a dynamic, modular AI architecture to process user request
 - **Backend**: Node.js / Express
 - **Database**: PostgreSQL
 - **AI Engines**: 
-  - **Qwen AI**: Dedicated to complex reasoning, NLP, and intent extraction.
+  - **Qwen 3.8 Flash (`qwen/qwen3.8-flash`)**: Multi-modal reasoning engine via OpenRouter for intent classification, entity extraction, and multi-agent evidence correlation.
   - **EnterPro**: Agent orchestration, dispatch, and parallel task execution.
 
 ## Execution Flow Workflow

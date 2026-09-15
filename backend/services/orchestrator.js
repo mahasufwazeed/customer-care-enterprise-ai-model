@@ -1,74 +1,64 @@
-const { pool } = require('../db');
+const { pool } = require('../src/db');
+const { 
+    extractIntentWithQwen, 
+    correlateEvidenceWithQwen, 
+    DEFAULT_MODEL 
+} = require('./qwenClient');
 
-async function qwenIntentExtraction(input) {
-    let intent = 'UNKNOWN';
-    if (input.toLowerCase().includes('refund') || input.toLowerCase().includes('charge')) {
-        intent = 'BILLING_ISSUE';
-    } else if (input.toLowerCase().includes('where') || input.toLowerCase().includes('shipment')) {
-        intent = 'LOGISTICS_TRACKING';
-    } else if (input.toLowerCase().includes('upgrade') || input.toLowerCase().includes('tier')) {
-        intent = 'ACCOUNT_UPGRADE';
-    }
-
-    return {
-        intent,
-        extracted_entities: { keywords: input.split(' ') },
-        execution_path: intent !== 'UNKNOWN' ? 'PARALLEL_DISPATCH' : 'ESCALATE'
-    };
-}
-
+/**
+ * Dispatches EnterPro sub-agents in parallel across enterprise systems
+ */
 async function enterProDispatch(intent) {
     const promises = [
-        new Promise(resolve => setTimeout(() => resolve({ system: 'Billing', status: 'OK', lifetime_value: 1200.50, recent_failed_charges: 0 }), 500)),
-        new Promise(resolve => setTimeout(() => resolve({ system: 'CRM', tier: 'PRO', user_age_days: 340, account_standing: 'GOOD' }), 450)),
-        new Promise(resolve => setTimeout(() => resolve({ system: 'Logistics', pending_shipments: 1, alerts: [] }), 600))
+        new Promise(resolve => setTimeout(() => resolve({ 
+            system: 'Billing', 
+            status: 'OK', 
+            lifetime_value: 1200.50, 
+            recent_failed_charges: 0 
+        }), 200)),
+        new Promise(resolve => setTimeout(() => resolve({ 
+            system: 'CRM', 
+            tier: 'PRO', 
+            user_age_days: 340, 
+            account_standing: 'GOOD' 
+        }), 180)),
+        new Promise(resolve => setTimeout(() => resolve({ 
+            system: 'Logistics', 
+            pending_shipments: 1, 
+            alerts: [] 
+        }), 220))
     ];
 
     return await Promise.all(promises);
 }
 
-async function verifyAndAudit(qwenResult, agentFindings) {
-    let confidenceScore = 85.0;
-    let fraudFlag = false;
-    let policyAuditPassed = true;
-
-    const billing = agentFindings.find(a => a.system === 'Billing');
-
-    if (billing && billing.recent_failed_charges > 0) {
-        confidenceScore -= 30;
-        fraudFlag = true;
-    }
-    if (qwenResult.intent === 'UNKNOWN') {
-        confidenceScore = 15.0;
-        policyAuditPassed = false;
-    }
-
-    if (Math.random() < 0.2) {
-        confidenceScore -= 40;
-        policyAuditPassed = false;
-    }
-
-    return { confidenceScore, fraudFlag, policyAuditPassed };
-}
-
+/**
+ * End-to-end request processing with Qwen 3.8 Flash & EnterPro
+ */
 async function processRequest(input) {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
-        // 1. Qwen Intent
-        const qwenResult = await qwenIntentExtraction(input);
+        // 1. Qwen 3.8 Flash Intent Extraction
+        const qwenResult = await extractIntentWithQwen(input);
 
         const ticketRes = await client.query(
             `INSERT INTO tickets (intent_extracted, status, confidence_score, fraud_flag, policy_audit_passed, requires_human_handoff) 
              VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-            [qwenResult.intent, 'PENDING', 0, false, true, false]
+            [qwenResult.intent, 'PENDING', qwenResult.confidence || 0, false, true, false]
         );
         const ticketId = ticketRes.rows[0].id;
 
         await client.query(
             `INSERT INTO logs (ticket_id, agent_name, action_type, evidence_payload, message) VALUES ($1, $2, $3, $4, $5)`,
-            [ticketId, 'Qwen AI', 'INTENT_EXTRACTION', qwenResult, 'Extracted intent from user input']
+            [
+                ticketId, 
+                'Qwen 3.8 Flash', 
+                'INTENT_EXTRACTION', 
+                qwenResult, 
+                `Extracted intent [${qwenResult.intent}] using ${qwenResult.model}`
+            ]
         );
 
         let finalAction = '';
@@ -77,14 +67,33 @@ async function processRequest(input) {
         let verification = {};
 
         if (qwenResult.execution_path === 'PARALLEL_DISPATCH') {
+            // 2. EnterPro Agent Dispatch
             agentFindings = await enterProDispatch(qwenResult.intent);
 
             await client.query(
                 `INSERT INTO logs (ticket_id, agent_name, action_type, evidence_payload, message) VALUES ($1, $2, $3, $4, $5)`,
-                [ticketId, 'EnterPro', 'PARALLEL_DISPATCH', JSON.stringify(agentFindings), 'Dispatched sub-agents and collected findings']
+                [
+                    ticketId, 
+                    'EnterPro Orchestrator', 
+                    'PARALLEL_DISPATCH', 
+                    JSON.stringify(agentFindings), 
+                    'Dispatched sub-agents (Billing, CRM, Logistics) in parallel'
+                ]
             );
 
-            verification = await verifyAndAudit(qwenResult, agentFindings);
+            // 3. Qwen 3.8 Flash Evidence Correlation & Audit
+            verification = await correlateEvidenceWithQwen(input, qwenResult, agentFindings);
+
+            await client.query(
+                `INSERT INTO logs (ticket_id, agent_name, action_type, evidence_payload, message) VALUES ($1, $2, $3, $4, $5)`,
+                [
+                    ticketId, 
+                    'Qwen 3.8 Flash', 
+                    'EVIDENCE_CORRELATION', 
+                    verification, 
+                    `Audit: Score ${verification.confidenceScore}%, Fraud: ${verification.fraudFlag}`
+                ]
+            );
 
             if (verification.fraudFlag || !verification.policyAuditPassed || verification.confidenceScore < 70) {
                 finalAction = 'HIGH_RISK_HANDOFF';
@@ -93,13 +102,18 @@ async function processRequest(input) {
                 finalAction = 'AUTO_EXECUTED';
                 await client.query(
                     `INSERT INTO transactions (ticket_id, system_origin, transaction_type, amount, currency, transaction_status) VALUES ($1, $2, $3, $4, $5, $6)`,
-                    [ticketId, 'System', qwenResult.intent, 0, 'USD', 'SUCCESS']
+                    [ticketId, 'EnterPro Engine', qwenResult.intent, 0, 'USD', 'SUCCESS']
                 );
             }
         } else {
             finalAction = 'HIGH_RISK_HANDOFF';
             requiresHandoff = true;
-            verification = { confidenceScore: 10.0, fraudFlag: false, policyAuditPassed: false };
+            verification = { 
+                confidenceScore: 15.0, 
+                fraudFlag: false, 
+                policyAuditPassed: false,
+                reasoning: 'Ticket escalated immediately based on intent risk profile'
+            };
         }
 
         await client.query(
@@ -111,25 +125,51 @@ async function processRequest(input) {
 
         return {
             ticket: {
-                id: ticketId, input, intent: qwenResult.intent, status: finalAction,
-                confidence_score: verification.confidenceScore, fraud_flag: verification.fraudFlag,
-                requires_human_handoff: requiresHandoff
+                id: ticketId,
+                input,
+                intent: qwenResult.intent,
+                status: finalAction,
+                confidence_score: verification.confidenceScore,
+                fraud_flag: verification.fraudFlag,
+                requires_human_handoff: requiresHandoff,
+                model_used: qwenResult.model,
+                reasoning: qwenResult.reasoning
             },
             steps: [
-                { step: 'Qwen Intent Extraction', result: qwenResult },
-                { step: 'EnterPro Agent Dispatch', result: agentFindings },
-                { step: 'Verify & Audit', result: verification },
-                { step: 'Action', result: finalAction }
+                { 
+                    step: 'Qwen 3.8 Flash Intent Extraction', 
+                    agent: 'Qwen AI',
+                    model: qwenResult.model,
+                    result: qwenResult 
+                },
+                { 
+                    step: 'EnterPro Agent Dispatch', 
+                    agent: 'EnterPro Orchestrator',
+                    result: agentFindings 
+                },
+                { 
+                    step: 'Reasoning & Evidence Correlation', 
+                    agent: 'Qwen AI Audit',
+                    result: verification 
+                },
+                { 
+                    step: 'Action & Execution', 
+                    result: finalAction 
+                }
             ]
         };
 
     } catch (e) {
         await client.query('ROLLBACK');
-        console.error(e);
+        console.error('[Orchestration Error]', e);
         throw e;
     } finally {
         client.release();
     }
 }
 
-module.exports = { processRequest };
+module.exports = { 
+    processRequest,
+    enterProDispatch,
+    DEFAULT_MODEL
+};

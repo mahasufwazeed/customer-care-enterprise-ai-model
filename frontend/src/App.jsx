@@ -9,6 +9,14 @@ function App() {
     const [response, setResponse] = useState(null);
     const [tickets, setTickets] = useState([]);
     const [selectedTicket, setSelectedTicket] = useState(null);
+    const [modelInfo, setModelInfo] = useState(null);
+
+    useEffect(() => {
+        fetch('http://localhost:3001/api/model-status')
+            .then(res => res.json())
+            .then(data => setModelInfo(data))
+            .catch(err => console.warn('Could not load model status:', err));
+    }, []);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -59,7 +67,23 @@ function App() {
         <div className="container">
             <header className="header">
                 <h1>AI Agent Orchestrator</h1>
-                <p>EnterPro + Qwen Reasoning Engine</p>
+                <p>EnterPro + Qwen 3.8 Flash Reasoning Engine</p>
+                {modelInfo && (
+                    <div style={{ marginTop: '8px', fontSize: '0.85rem', color: '#94a3b8' }}>
+                        <span style={{ 
+                            display: 'inline-flex', 
+                            alignItems: 'center', 
+                            gap: '6px', 
+                            background: 'rgba(255,255,255,0.06)', 
+                            padding: '4px 10px', 
+                            borderRadius: '12px',
+                            border: '1px solid rgba(255,255,255,0.1)'
+                        }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: modelInfo.authenticated ? '#10b981' : '#ef4444' }} />
+                            Engine: <strong>{modelInfo.active_model}</strong> ({modelInfo.provider})
+                        </span>
+                    </div>
+                )}
                 <div className="tabs">
                     <button className={activeTab === 'new' ? 'active' : ''} onClick={() => setActiveTab('new')}>New Ticket</button>
                     <button className={activeTab === 'dashboard' ? 'active' : ''} onClick={() => setActiveTab('dashboard')}>System Dashboard</button>
@@ -93,6 +117,10 @@ function App() {
                                     <span className="value">{response.ticket.intent}</span>
                                 </div>
                                 <div className="metric">
+                                    <span className="label">Model</span>
+                                    <span className="value" style={{ fontSize: '0.85rem' }}>{response.ticket.model_used || 'qwen/qwen3.8-flash'}</span>
+                                </div>
+                                <div className="metric">
                                     <span className="label">Confidence</span>
                                     <span className="value">{response.ticket.confidence_score}%</span>
                                 </div>
@@ -101,6 +129,12 @@ function App() {
                                     <span className="value">{response.ticket.fraud_flag ? <ShieldAlert color="red" /> : <Activity color="#10b981" />}</span>
                                 </div>
                             </div>
+
+                            {response.ticket.reasoning && (
+                                <div style={{ marginTop: '14px', padding: '12px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', fontSize: '0.88rem', borderLeft: '3px solid #3b82f6' }}>
+                                    <strong style={{ color: '#60a5fa' }}>Qwen Reasoning:</strong> {response.ticket.reasoning}
+                                </div>
+                            )}
                         </div>
                     )}
                 </main>
